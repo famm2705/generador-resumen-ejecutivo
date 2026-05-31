@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local virtual environments and secrets
+.venv/
+.env
+*.env
+!.env.example
+!.venv.example
+
+# Runtime folders
+logs/
+work/
+outputs/*
+!outputs/.gitkeep
+
+# Excel data and generated reports
+*.xlsx
+*.xlsm
+*.xls
+~$*
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
