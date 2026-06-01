@@ -54,9 +54,12 @@ def drive_root() -> str:
 
 def download_file(token: str, remote_path: str, local_path: Path) -> None:
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    url = f"{GRAPH_BASE}{drive_root()}/root:/{quote_drive_path(remote_path)}:/content"
-    request = urllib.request.Request(url, headers=auth_headers(token), method="GET")
     try:
+        metadata = graph_get_json(token, f"{drive_root()}/root:/{quote_drive_path(remote_path)}")
+        download_url = metadata.get("@microsoft.graph.downloadUrl")
+        if not download_url:
+            raise RuntimeError(f"El item existe, pero Microsoft Graph no devolvio downloadUrl. Tipo detectado: {metadata.get('folder') or metadata.get('file') or metadata.keys()}")
+        request = urllib.request.Request(download_url, headers={"User-Agent": "pmo-dashboard-runner"}, method="GET")
         with urllib.request.urlopen(request, timeout=120) as response:
             local_path.write_bytes(response.read())
     except urllib.error.HTTPError as exc:
@@ -65,9 +68,15 @@ def download_file(token: str, remote_path: str, local_path: Path) -> None:
             raise RuntimeError(
                 "OneDrive no encontro el archivo solicitado.\n"
                 f"Ruta configurada: {remote_path}\n"
-                f"URL Graph: {url}\n\n"
+                f"URL Graph: {GRAPH_BASE}{drive_root()}/root:/{quote_drive_path(remote_path)}\n\n"
                 f"{diagnostics}\n"
                 "Corrige ONEDRIVE_INPUT_PATH u ONEDRIVE_PROMPT_PATH en GitHub Variables."
+            ) from exc
+        if exc.code == 401:
+            raise RuntimeError(
+                "Microsoft devolvio 401 al descargar el archivo. "
+                "Verifica que el refresh token sea de la misma cuenta OneDrive que contiene el archivo, "
+                "y que la app tenga permisos delegados Files.ReadWrite.All y offline_access."
             ) from exc
         raise
 
