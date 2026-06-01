@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -23,7 +24,7 @@ def request_json(url: str, data: dict[str, str]) -> dict:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
+        with urllib.request.urlopen(request, timeout=25) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         details = exc.read().decode("utf-8", errors="replace")
@@ -35,6 +36,8 @@ def request_json(url: str, data: dict[str, str]) -> dict:
             message = mobile_client_error_message(payload)
             raise RuntimeError(message) from exc
         raise RuntimeError(json.dumps(payload, indent=2, ensure_ascii=False)) from exc
+    except (TimeoutError, socket.timeout, urllib.error.URLError, OSError) as exc:
+        raise RuntimeError(f"network_wait: no hubo respuesta de Microsoft a tiempo ({exc}).") from exc
 
 
 def mobile_client_error_message(payload: dict) -> str:
@@ -90,6 +93,9 @@ def main() -> int:
             if "slow_down" in text:
                 interval += 5
                 continue
+            if "network_wait" in text:
+                print("Sin respuesta temporal de Microsoft; reintentando...")
+                continue
             raise
 
         refresh_token = token.get("refresh_token")
@@ -104,4 +110,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(
+            "\nProceso interrumpido. Vuelve a ejecutar el script y completa el login en el navegador antes de cerrar PowerShell."
+        )
