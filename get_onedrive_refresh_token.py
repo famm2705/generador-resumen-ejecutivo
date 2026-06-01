@@ -31,7 +31,28 @@ def request_json(url: str, data: dict[str, str]) -> dict:
             payload = json.loads(details)
         except json.JSONDecodeError:
             raise RuntimeError(f"HTTP {exc.code}: {details}") from exc
+        if payload.get("error") == "invalid_client" and "marked as 'mobile'" in payload.get("error_description", ""):
+            message = mobile_client_error_message(payload)
+            raise RuntimeError(message) from exc
         raise RuntimeError(json.dumps(payload, indent=2, ensure_ascii=False)) from exc
+
+
+def mobile_client_error_message(payload: dict) -> str:
+    message = """
+La app de Entra no esta marcada como cliente publico/mobile.
+
+Corrige esto en Microsoft Entra:
+1. App registrations > tu app > Authentication.
+2. Add a platform > Mobile and desktop applications.
+3. Agrega este Redirect URI:
+   https://login.microsoftonline.com/common/oauth2/nativeclient
+4. En Advanced settings, activa:
+   Allow public client flows = Yes
+5. Guarda los cambios y vuelve a ejecutar este script.
+
+Detalle original de Microsoft:
+"""
+    return message + json.dumps(payload, indent=2, ensure_ascii=False)
 
 
 def main() -> int:
