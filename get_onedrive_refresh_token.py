@@ -75,8 +75,11 @@ def main() -> int:
 
     deadline = time.time() + int(device.get("expires_in", 900))
     interval = int(device.get("interval", 5))
+    attempt = 0
     while time.time() < deadline:
         time.sleep(interval)
+        attempt += 1
+        print(f"Polling Microsoft token endpoint... intento {attempt}", flush=True)
         try:
             token = request_json(
                 TOKEN_URL,
