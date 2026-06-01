@@ -56,8 +56,20 @@ def download_file(token: str, remote_path: str, local_path: Path) -> None:
     local_path.parent.mkdir(parents=True, exist_ok=True)
     url = f"{GRAPH_BASE}{drive_root()}/root:/{quote_drive_path(remote_path)}:/content"
     request = urllib.request.Request(url, headers=auth_headers(token), method="GET")
-    with urllib.request.urlopen(request, timeout=120) as response:
-        local_path.write_bytes(response.read())
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            local_path.write_bytes(response.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            diagnostics = one_drive_path_diagnostics(token, remote_path)
+            raise RuntimeError(
+                "OneDrive no encontro el archivo solicitado.\n"
+                f"Ruta configurada: {remote_path}\n"
+                f"URL Graph: {url}\n\n"
+                f"{diagnostics}\n"
+                "Corrige ONEDRIVE_INPUT_PATH u ONEDRIVE_PROMPT_PATH en GitHub Variables."
+            ) from exc
+        raise
 
 
 def upload_file(token: str, local_path: Path, remote_path: str) -> dict:
@@ -79,6 +91,33 @@ def request_json(request: urllib.request.Request) -> dict:
         details = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"HTTP {exc.code}: {details}") from exc
     return json.loads(body) if body else {}
+
+
+def graph_get_json(token: str, path: str) -> dict:
+    request = urllib.request.Request(f"{GRAPH_BASE}{path}", headers=auth_headers(token), method="GET")
+    return request_json(request)
+
+
+def one_drive_path_diagnostics(token: str, remote_path: str) -> str:
+    lines = ["Diagnostico OneDrive:"]
+    try:
+        root = graph_get_json(token, f"{drive_root()}/root/children")
+        names = [item.get("name", "(sin nombre)") for item in root.get("value", [])]
+        lines.append("Root contiene: " + (", ".join(names[:30]) if names else "(vacio o no visible)"))
+    except Exception as exc:
+        lines.append(f"No se pudo listar root: {exc}")
+
+    parts = [part for part in remote_path.replace("\\", "/").split("/") if part]
+    for depth in range(1, min(len(parts), 3) + 1):
+        folder = "/".join(parts[:depth])
+        try:
+            children = graph_get_json(token, f"{drive_root()}/root:/{quote_drive_path(folder)}:/children")
+            names = [item.get("name", "(sin nombre)") for item in children.get("value", [])]
+            lines.append(f"Contenido de '{folder}': " + (", ".join(names[:30]) if names else "(vacio o no visible)"))
+        except Exception as exc:
+            lines.append(f"No se pudo listar '{folder}': {exc}")
+            break
+    return "\n".join(lines)
 
 
 def auth_headers(token: str) -> dict[str, str]:
