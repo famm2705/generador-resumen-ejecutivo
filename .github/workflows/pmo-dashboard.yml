@@ -3,8 +3,8 @@ name: PMO EVM Dashboard
 on:
   workflow_dispatch:
   schedule:
-    # GitHub Actions schedules use UTC. 12:00 UTC = 8:00 AM America/New_York during EDT.
-    - cron: "0 12 * * 1-5"
+    # GitHub Actions schedules use UTC. 01:00 UTC Monday = 8:00 PM Sunday in Panama.
+    - cron: "0 1 * * 1"
 
 permissions:
   contents: read
@@ -34,7 +34,7 @@ jobs:
           ONEDRIVE_INPUT_PATH: ${{ vars.ONEDRIVE_INPUT_PATH }}
           ONEDRIVE_PROMPT_PATH: ${{ vars.ONEDRIVE_PROMPT_PATH }}
           ONEDRIVE_OUTPUT_FOLDER: ${{ vars.ONEDRIVE_OUTPUT_FOLDER }}
-          ONEDRIVE_OUTPUT_FILENAME: ${{ vars.ONEDRIVE_OUTPUT_FILENAME }}
+          ONEDRIVE_OUTPUT_NEXT_MONDAY: "true"
           USE_OPENAI: "true"
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}

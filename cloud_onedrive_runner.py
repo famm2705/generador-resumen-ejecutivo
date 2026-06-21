@@ -5,8 +5,9 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from generar_resumen_ejecutivo import generate
 
@@ -144,10 +145,22 @@ def quote_path_part(value: str) -> str:
 
 def output_remote_path() -> str:
     folder = os.getenv("ONEDRIVE_OUTPUT_FOLDER", "PMO EVM Reporting/Output").strip().strip("/")
+    if os.getenv("ONEDRIVE_OUTPUT_NEXT_MONDAY", "").lower() in {"1", "true", "yes", "y"}:
+        filename = f"Resumen_PMO_{next_monday_panama():%d_%m_%Y}.xlsx"
+        return f"{folder}/{filename}"
+
     filename = os.getenv("ONEDRIVE_OUTPUT_FILENAME")
     if not filename:
         filename = f"Resumen_PMO_{datetime.utcnow():%Y%m%d_%H%M%S}Z.xlsx"
     return f"{folder}/{filename}"
+
+
+def next_monday_panama() -> date:
+    today = datetime.now(ZoneInfo("America/Panama")).date()
+    days_until_monday = (0 - today.weekday()) % 7
+    if days_until_monday == 0:
+        days_until_monday = 7
+    return today + timedelta(days=days_until_monday)
 
 
 def main() -> int:
