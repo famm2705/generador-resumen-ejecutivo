@@ -5,9 +5,9 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from generar_resumen_ejecutivo import generate
 
@@ -156,10 +156,14 @@ def output_remote_path() -> str:
 
 
 def next_monday_panama() -> date:
-    today = datetime.now(ZoneInfo("America/Panama")).date()
+    try:
+        panama_tz = ZoneInfo("America/Panama")
+    except ZoneInfoNotFoundError:
+        # Panama does not use daylight saving time; UTC-5 is a safe fallback
+        # for Windows/Python environments without the tzdata package installed.
+        panama_tz = timezone(timedelta(hours=-5), name="America/Panama")
+    today = datetime.now(panama_tz).date()
     days_until_monday = (0 - today.weekday()) % 7
-    if days_until_monday == 0:
-        days_until_monday = 7
     return today + timedelta(days=days_until_monday)
 
 
