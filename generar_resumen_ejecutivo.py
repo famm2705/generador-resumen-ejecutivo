@@ -541,6 +541,175 @@ def build_top_risks(activity_risks: list[dict[str, Any]], global_metrics: dict[s
     return top
 
 
+def wbs_group(value: Any) -> str:
+    wbs = normalized_wbs(value)
+    if not wbs or wbs == "1":
+        return "Global"
+    parts = wbs.split(".")
+    return ".".join(parts[:2]) if len(parts) >= 2 else wbs
+
+
+def driver_family(drivers: str) -> str:
+    normalized = normalize_text(drivers)
+    if "sobrecosto" in normalized or "bajo cpi" in normalized:
+        return "costo"
+    if "bajo spi" in normalized or "atraso" in normalized:
+        return "cronograma"
+    if "holgura negativa" in normalized:
+        return "holgura"
+    if "presion eac" in normalized:
+        return "forecast"
+    if "ruta critica" in normalized:
+        return "ruta critica"
+    return "desempeno evm"
+
+
+def risk_group_consequence(family: str) -> str:
+    if family == "cronograma":
+        return "Puede desplazar entregables sucesores y aumentar probabilidad de atraso."
+    if family == "costo":
+        return "Puede consumir contingencia y deteriorar la proyeccion EAC."
+    if family == "holgura":
+        return "Puede eliminar margen de maniobra y volver fragiles las fechas compromiso."
+    if family == "forecast":
+        return "Puede presionar el costo estimado al cierre y requerir validacion de supuestos."
+    if family == "ruta critica":
+        return "Puede comprometer la fecha final si las actividades sucesoras no se protegen."
+    return "Puede deteriorar costo y cronograma del paquete si no se corrige."
+
+
+def risk_group_name(family: str, group_wbs: str, count: int) -> str:
+    scope = f"WBS {group_wbs}" if group_wbs != "Global" else "proyecto"
+    labels = {
+        "cronograma": "Riesgo de atraso por desempeno de cronograma",
+        "costo": "Riesgo de costo por desempeno financiero",
+        "holgura": "Riesgo por holgura negativa",
+        "forecast": "Riesgo de presion al cierre",
+        "ruta critica": "Concentracion de actividades en ruta critica",
+        "desempeno evm": "Riesgo de desempeno EVM adverso",
+    }
+    return f"{labels.get(family, 'Riesgo EVM')} en {scope} ({count} actividades)"
+
+
+def severity_label(severity: float) -> str:
+    if severity >= 70:
+        return "Critico"
+    if severity >= 45:
+        return "Alto"
+    if severity >= 25:
+        return "Moderado"
+    return "Bajo"
+
+
+def build_grouped_top_risks(
+    activity_risks: list[dict[str, Any]],
+    global_metrics: dict[str, Any],
+    prompt_text: str = "",
+    use_openai: bool = False,
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for item in activity_risks:
+        key = (wbs_group(item.get("WBS")), driver_family(str(item.get("Drivers") or "")))
+        grouped.setdefault(key, []).append(item)
+
+    ranked_groups = sorted(
+        grouped.items(),
+        key=lambda pair: (
+            max(as_number(item.get("Severidad")) for item in pair[1]),
+            len(pair[1]),
+            max(as_number(item.get("Impacto")) for item in pair[1]),
+        ),
+        reverse=True,
+    )
+
+    top: list[dict[str, Any]] = []
+    for index, ((group_wbs, family), items) in enumerate(ranked_groups[:10], start=1):
+        max_severity = max(as_number(item.get("Severidad")) for item in items)
+        severity = round(min(100, max_severity + min(10, max(0, len(items) - 1) * 1.5)), 1)
+        probability = min(0.95, 0.25 + severity / 100 * 0.45 + min(0.2, len(items) * 0.02))
+        activity_names = [str(item["Actividad"]) for item in items[:4]]
+        affected = f"{len(items)} actividades: " + "; ".join(activity_names)
+        if len(items) > 4:
+            affected += "; ..."
+        drivers = sorted({str(item.get("Drivers") or "desviacion EVM") for item in items})
+        top.append(
+            {
+                "#": index,
+                "Riesgo": risk_group_name(family, group_wbs, len(items)),
+                "Probabilidad": round(probability, 2),
+                "Impacto": severity_label(severity),
+                "Severidad": severity,
+                "Actividad afectada": affected,
+                "Consecuencia": risk_group_consequence(family),
+                "Mitigacion": corrective_action(", ".join(drivers).split(", ")),
+            }
+        )
+
+    if not top:
+        return build_top_risks(activity_risks, global_metrics)
+    if use_openai:
+        return enhance_risk_groups_with_openai(top, activity_risks, prompt_text)
+    return top
+
+
+def enhance_risk_groups_with_openai(
+    top_risks: list[dict[str, Any]],
+    activity_risks: list[dict[str, Any]],
+    prompt_text: str,
+) -> list[dict[str, Any]]:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key or not top_risks:
+        return top_risks
+    try:
+        from openai import OpenAI
+    except ImportError:
+        return top_risks
+
+    payload = {
+        "risk_groups": top_risks,
+        "evidence_activities": activity_risks[:30],
+    }
+    instructions = (
+        "Eres un analista PMO/EVM. Mejora la agrupacion ejecutiva de riesgos sin inventar datos. "
+        "Usa solo las actividades, WBS, drivers y metricas provistas. "
+        "Devuelve JSON valido con una lista llamada risk_groups. "
+        "Manten exactamente los campos #, Probabilidad, Impacto y Severidad de entrada sin cambiarlos. "
+        "Puedes mejorar solo Riesgo, Actividad afectada, Consecuencia y Mitigacion. "
+        "Maximo 10 grupos, sin markdown."
+    )
+    if prompt_text.strip():
+        instructions += "\n\nCriterios adicionales:\n" + prompt_text[:2000]
+
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.responses.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-5.5"),
+            instructions=instructions,
+            input=json.dumps(payload, ensure_ascii=False, default=str),
+            max_output_tokens=1400,
+        )
+        parsed = json.loads((response.output_text or "").strip())
+    except Exception:
+        return top_risks
+
+    proposed = parsed.get("risk_groups") if isinstance(parsed, dict) else None
+    if not isinstance(proposed, list):
+        return top_risks
+
+    enhanced: list[dict[str, Any]] = []
+    by_index = {item["#"]: item for item in top_risks}
+    for item in proposed:
+        if not isinstance(item, dict) or item.get("#") not in by_index:
+            continue
+        base = by_index[item["#"]].copy()
+        for field in ("Riesgo", "Actividad afectada", "Consecuencia", "Mitigacion"):
+            value = item.get(field)
+            if isinstance(value, str) and value.strip():
+                base[field] = value.strip()[:600]
+        enhanced.append(base)
+    return enhanced or top_risks
+
+
 def delay_probability(global_metrics: dict[str, Any], rows: list[dict[str, Any]], activity_risks: list[dict[str, Any]]) -> tuple[float, str]:
     spi = global_metrics.get("SPI")
     if spi is None:
@@ -812,7 +981,7 @@ def write_dashboard(
     global_row = select_global_row(rows)
     project_name = str(global_row.get("TASK") or "Proyecto EVM").strip()
     activity_risks = build_activity_risks(rows)
-    top_risks = build_top_risks(activity_risks, global_row)
+    top_risks = build_grouped_top_risks(activity_risks, global_row, prompt_text, use_openai=use_openai)
     delay = delay_probability(global_row, rows, activity_risks)
     trend = trend_label(global_row, activity_risks)
     finish_forecast = forecast_finish(global_row, rows)
