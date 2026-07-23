@@ -18,6 +18,7 @@ GRAPH_SCOPES = "https://graph.microsoft.com/Files.ReadWrite.All offline_access"
 LOCAL_INPUT = Path("work/input.xlsx")
 LOCAL_OUTPUT = Path("work/output_Resumen_PMO.xlsx")
 LOCAL_PROMPT = Path("Prompt.txt")
+EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
 
 
 def required_env(name: str) -> str:
@@ -80,6 +81,55 @@ def download_file(token: str, remote_path: str, local_path: Path) -> None:
                 "y que la app tenga permisos delegados Files.ReadWrite.All y offline_access."
             ) from exc
         raise
+
+
+def list_folder_children(token: str, remote_folder: str) -> list[dict]:
+    response = graph_get_json(token, f"{drive_root()}/root:/{quote_drive_path(remote_folder)}:/children")
+    return response.get("value", [])
+
+
+def latest_excel_in_folder(token: str, remote_folder: str) -> str:
+    children = list_folder_children(token, remote_folder)
+    excel_files = [
+        item
+        for item in children
+        if item.get("file")
+        and not str(item.get("name", "")).startswith("~$")
+        and Path(str(item.get("name", ""))).suffix.lower() in EXCEL_EXTENSIONS
+    ]
+    if not excel_files:
+        names = ", ".join(str(item.get("name", "(sin nombre)")) for item in children[:30])
+        raise RuntimeError(
+            "No se encontro ningun archivo Excel valido para usar como input.\n"
+            f"Folder configurado: {remote_folder}\n"
+            f"Contenido detectado: {names if names else '(vacio)'}"
+        )
+    latest = max(excel_files, key=lambda item: item.get("lastModifiedDateTime") or item.get("createdDateTime") or "")
+    return f"{remote_folder.strip().strip('/')}/{latest['name']}"
+
+
+def parent_folder(remote_path: str) -> str:
+    parts = [part for part in remote_path.replace("\\", "/").split("/") if part]
+    if len(parts) <= 1:
+        return ""
+    return "/".join(parts[:-1])
+
+
+def resolve_input_path(token: str) -> str:
+    configured_path = required_env("ONEDRIVE_INPUT_PATH").strip().strip("/")
+    use_latest = os.getenv("ONEDRIVE_INPUT_LATEST", "").lower() in {"1", "true", "yes", "y"}
+    if not use_latest:
+        return configured_path
+
+    folder = (os.getenv("ONEDRIVE_INPUT_FOLDER") or parent_folder(configured_path)).strip().strip("/")
+    if not folder:
+        raise RuntimeError(
+            "ONEDRIVE_INPUT_LATEST=true requiere ONEDRIVE_INPUT_FOLDER, "
+            "o que ONEDRIVE_INPUT_PATH incluya un folder padre."
+        )
+    latest_path = latest_excel_in_folder(token, folder)
+    print(f"Input mas reciente detectado en OneDrive: {latest_path}")
+    return latest_path
 
 
 def upload_file(token: str, local_path: Path, remote_path: str) -> dict:
@@ -169,7 +219,7 @@ def next_monday_panama() -> date:
 
 def main() -> int:
     token = graph_token()
-    input_path = required_env("ONEDRIVE_INPUT_PATH")
+    input_path = resolve_input_path(token)
     prompt_path = os.getenv("ONEDRIVE_PROMPT_PATH")
 
     print(f"Descargando input desde OneDrive: {input_path}")

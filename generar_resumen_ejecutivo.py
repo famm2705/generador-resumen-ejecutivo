@@ -90,6 +90,15 @@ def safe_float(value: Any) -> float | None:
         return None
 
 
+def safe_percent(value: Any) -> float | None:
+    number = safe_float(value)
+    if number is None:
+        return None
+    if isinstance(value, str) and "%" in value:
+        return number / 100
+    return number / 100 if number > 1 else number
+
+
 def safe_div(numerator: float | None, denominator: float | None) -> float | None:
     if numerator is None or denominator is None or abs(denominator) < 1e-9:
         return None
@@ -134,6 +143,21 @@ def classify_index(value: float | None) -> str:
     return "Rojo"
 
 
+def cost_data_anomaly(metrics: dict[str, Any]) -> bool:
+    ac = as_number(metrics.get("AC"))
+    ev = as_number(metrics.get("EV"))
+    bac = as_number(metrics.get("BAC"))
+    if ev <= 0 or bac <= 0:
+        return False
+    return ac <= 0 or (ac / ev < 0.05 and ac / bac < 0.02)
+
+
+def classify_cpi(metrics: dict[str, Any]) -> str:
+    if cost_data_anomaly(metrics):
+        return "Dato atípico"
+    return classify_index(metrics.get("CPI"))
+
+
 def classify_tcpi(value: float | None) -> str:
     if value is None:
         return "N/D"
@@ -148,7 +172,7 @@ def status_fill(status: str) -> PatternFill:
     normalized = normalize_text(status)
     if "verde" in normalized or "favorable" in normalized or "positivo" in normalized or "bajo" in normalized:
         return PatternFill("solid", fgColor=PALETTE["green_light"])
-    if "amarillo" in normalized or "observacion" in normalized or "moderado" in normalized or "estable" in normalized:
+    if "amarillo" in normalized or "observacion" in normalized or "moderado" in normalized or "estable" in normalized or "atipico" in normalized or "validacion" in normalized:
         return PatternFill("solid", fgColor=PALETTE["amber_light"])
     if "rojo" in normalized or "critico" in normalized or "alto" in normalized or "presion" in normalized:
         return PatternFill("solid", fgColor=PALETTE["red_light"])
@@ -159,6 +183,13 @@ def canonical_header(header: Any) -> str | None:
     normalized = normalize_text(header)
     if not normalized:
         return None
+
+    if "physical" in normalized and ("complete" in normalized or "earned value" in normalized):
+        return "PHYSICAL_PCT_COMPLETE"
+    if ("complete" in normalized or "completado" in normalized or "avance" in normalized) and (
+        "planned value" in normalized or "planificado" in normalized
+    ):
+        return "PLANNED_PCT_COMPLETE"
 
     exact = {
         "pv": "PV",
@@ -241,7 +272,10 @@ def read_rows(workbook, table: SourceTable) -> list[dict[str, Any]]:
     ws = workbook[table.sheet_name]
     rows: list[dict[str, Any]] = []
     for row_idx in range(table.data_start_row, table.data_end_row + 1):
-        row: dict[str, Any] = {"__excel_row": row_idx}
+        row: dict[str, Any] = {
+            "__excel_row": row_idx,
+            "__critical_by_red_fill": row_has_red_fill(ws, row_idx, table),
+        }
         has_value = False
         for canonical, col in table.columns.items():
             value = ws.cell(row_idx, col).value
@@ -260,6 +294,26 @@ def read_rows(workbook, table: SourceTable) -> list[dict[str, Any]]:
     return rows
 
 
+def row_has_red_fill(ws, row_idx: int, table: SourceTable) -> bool:
+    for col_idx in range(1, max(table.columns.values()) + 1):
+        fill = ws.cell(row_idx, col_idx).fill
+        if not fill or fill.fill_type != "solid":
+            continue
+        color = fill.fgColor
+        if color.type == "rgb" and str(color.rgb or "").upper().endswith("FFC7CE"):
+            return True
+    return False
+
+
+def is_critical_path(row: dict[str, Any]) -> bool:
+    if row.get("__critical_by_red_fill"):
+        return True
+    value = row.get("CRITICAL_PATH")
+    if isinstance(value, bool):
+        return value
+    return normalize_text(value) in {"si", "yes", "true", "1", "critico", "critical"}
+
+
 def calculate_row_metrics(row: dict[str, Any]) -> None:
     for key in MONEY_COLUMNS | INDEX_COLUMNS:
         row[key] = safe_float(row.get(key))
@@ -276,6 +330,12 @@ def calculate_row_metrics(row: dict[str, Any]) -> None:
     row["TCPI"] = row["TCPI"] if row.get("TCPI") is not None else safe_div(delta(bac, ev), delta(bac, ac))
     row["START_DATE"] = parse_date(row.get("START"))
     row["FINISH_DATE"] = parse_date(row.get("FINISH"))
+    planned_progress = row.get("PLANNED_PCT_COMPLETE")
+    if planned_progress is None:
+        planned_progress = row.get("PCT_COMPLETE")
+    row["PLANNED_PROGRESS"] = safe_percent(planned_progress)
+    row["PHYSICAL_PROGRESS"] = safe_percent(row.get("PHYSICAL_PCT_COMPLETE"))
+    row["IS_CRITICAL_PATH"] = is_critical_path(row)
 
 
 def delta(left: float | None, right: float | None) -> float | None:
@@ -305,7 +365,7 @@ def row_is_analyzable(row: dict[str, Any]) -> bool:
     if not str(row.get("TASK") or "").strip():
         return False
     money_signal = any(abs(as_number(row.get(key))) > 1e-9 for key in ("PV", "EV", "AC", "BAC", "SV", "CV"))
-    return money_signal
+    return money_signal or bool(row.get("IS_CRITICAL_PATH"))
 
 
 def activity_risk(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -317,6 +377,11 @@ def activity_risk(row: dict[str, Any]) -> dict[str, Any] | None:
     float_value = safe_float(row.get("FLOAT"))
     score = 0.0
     drivers: list[str] = []
+    critical_path = bool(row.get("IS_CRITICAL_PATH"))
+
+    if critical_path:
+        score += 45
+        drivers.append("ruta crítica")
 
     if spi is not None and as_number(row.get("PV")) > 0 and spi < 0.85:
         score += min(35, (0.85 - spi) * 60)
@@ -358,7 +423,11 @@ def activity_risk(row: dict[str, Any]) -> dict[str, Any] | None:
 
     return {
         "Actividad": str(row.get("TASK") or "N/D").strip(),
+        "WBS": str(row.get("WBS") or "N/D").strip(),
         "Responsable": str(row.get("RESPONSIBLE") or "N/D").strip(),
+        "Inicio": row.get("START_DATE"),
+        "Fin": row.get("FINISH_DATE"),
+        "RutaCritica": critical_path,
         "SPI": row.get("SPI"),
         "CPI": row.get("CPI"),
         "Float": float_value if float_value is not None else "N/D",
@@ -372,6 +441,8 @@ def activity_risk(row: dict[str, Any]) -> dict[str, Any] | None:
 
 def corrective_action(drivers: Iterable[str]) -> str:
     driver_set = set(drivers)
+    if "ruta crítica" in driver_set:
+        return "Proteger fechas, restricciones y sucesoras de la ruta crítica con seguimiento semanal."
     if "sobrecosto" in driver_set or "bajo CPI" in driver_set:
         return "Revisar costo incurrido, compromisos y productividad semanal."
     if "bajo SPI" in driver_set or "atraso" in driver_set:
@@ -383,8 +454,8 @@ def corrective_action(drivers: Iterable[str]) -> str:
 
 def build_activity_risks(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     risks = [risk for row in rows[1:] for risk in [activity_risk(row)] if risk]
-    risks.sort(key=lambda item: (item["Severidad"], item["Impacto"]), reverse=True)
-    return risks[:10]
+    risks.sort(key=lambda item: (item["RutaCritica"], item["Severidad"], item["Impacto"]), reverse=True)
+    return risks
 
 
 def build_top_risks(activity_risks: list[dict[str, Any]], global_metrics: dict[str, Any]) -> list[dict[str, Any]]:
@@ -442,9 +513,11 @@ def delay_probability(global_metrics: dict[str, Any], rows: list[dict[str, Any]]
 
     analyzable_count = max(1, sum(1 for row in rows[1:] if row_is_analyzable(row)))
     critical_ratio = min(0.35, len(activity_risks) / analyzable_count * 1.8)
+    path_count = sum(1 for row in rows[1:] if row.get("IS_CRITICAL_PATH"))
+    path_component = min(0.2, path_count / analyzable_count * 0.5)
     negative_float_count = sum(1 for row in rows[1:] if (safe_float(row.get("FLOAT")) or 0) < 0)
     float_component = min(0.15, negative_float_count / analyzable_count)
-    probability = min(0.95, max(0.05, base + critical_ratio + float_component))
+    probability = min(0.95, max(0.05, base + critical_ratio + path_component + float_component))
 
     if probability < 0.25:
         level = "Bajo"
@@ -469,7 +542,9 @@ def trend_label(global_metrics: dict[str, Any], activity_risks: list[dict[str, A
 
 
 def forecast_finish(global_metrics: dict[str, Any], rows: list[dict[str, Any]]) -> str:
-    finish_dates = [row["FINISH_DATE"] for row in rows if row.get("FINISH_DATE")]
+    finish_dates = [global_metrics["FINISH_DATE"]] if global_metrics.get("FINISH_DATE") else [
+        row["FINISH_DATE"] for row in rows if row.get("FINISH_DATE")
+    ]
     if not finish_dates:
         return "No calculable con fecha"
     latest_finish = max(finish_dates)
@@ -526,15 +601,22 @@ def build_executive_narrative(
     bac, eac, vac = global_metrics.get("BAC"), global_metrics.get("EAC"), global_metrics.get("VAC")
     status = overall_status(global_metrics, delay)
     risk_count = len(activity_risks)
+    critical_count = sum(1 for item in activity_risks if item.get("RutaCritica"))
     primary_risk = activity_risks[0]["Actividad"] if activity_risks else "sin actividad crítica prioritaria"
     limitation = ""
     if missing_fields:
         limitation = f" La fuente no incluye {', '.join(missing_fields[:6])}; esos elementos se reportan como N/D y limitan el forecast calendario."
+    cost_warning = ""
+    if cost_data_anomaly(global_metrics):
+        cost_warning = (
+            " El AC reportado es muy bajo frente a EV y BAC; por ello CPI, EAC, ETC y VAC "
+            "son matemáticamente consistentes pero no deben usarse para decisión hasta validar costos reales."
+        )
     return [
-        f"El proyecto {project_name} se clasifica como {status}. El desempeño global muestra SPI {format_index(spi)} y CPI {format_index(cpi)}, con avance real {format_percent(safe_div(global_metrics.get('EV'), bac))} frente a avance planificado {format_percent(safe_div(global_metrics.get('PV'), bac))}.",
-        f"Financieramente, el BAC es {format_money(bac)}, el EAC proyectado es {format_money(eac)} y la variación al cierre es {format_money(vac)}. La lectura ejecutiva indica {classify_index(cpi).lower()} en costo y {classify_index(spi).lower()} en cronograma.",
-        f"La probabilidad estimada de atraso es {format_percent(delay[0])} con nivel {delay[1]}. Se priorizan {risk_count} actividades/paquetes para acción, comenzando por {primary_risk}.",
-        f"Recomendación PMO: validar semanalmente las desviaciones EVM, confirmar causas raíz con los responsables, proteger ruta crítica cuando esté disponible y formalizar un plan de recuperación para los paquetes con SPI/CPI bajo 0.85.{limitation}",
+        f"El proyecto {project_name} se clasifica como {status}. El desempeño global muestra SPI {format_index(spi)} y CPI {format_index(cpi)}, con avance físico {format_percent(project_physical_progress(global_metrics))} frente a avance planificado {format_percent(project_planned_progress(global_metrics))}.",
+        f"Financieramente, el BAC es {format_money(bac)}, el EAC proyectado es {format_money(eac)} y la variación al cierre es {format_money(vac)}. La lectura ejecutiva indica {classify_cpi(global_metrics).lower()} en costo y {classify_index(spi).lower()} en cronograma.{cost_warning}",
+        f"La probabilidad estimada de atraso es {format_percent(delay[0])} con nivel {delay[1]}. Se detectan {risk_count} actividades/paquetes con señales de riesgo y el tablero prioriza las 10 principales; {critical_count} pertenecen a la ruta crítica identificada en rojo. El primer foco es {primary_risk}.",
+        f"Recomendación PMO: proteger las fechas y sucesoras de la ruta crítica, validar semanalmente las desviaciones EVM y formalizar un plan de recuperación para los paquetes con SPI/CPI bajo 0.85.{limitation}",
     ]
 
 
@@ -608,7 +690,9 @@ def enhance_narrative_with_openai(
 
 def overall_status(global_metrics: dict[str, Any], delay: tuple[float, str]) -> str:
     spi_status = classify_index(global_metrics.get("SPI"))
-    cpi_status = classify_index(global_metrics.get("CPI"))
+    cpi_status = classify_cpi(global_metrics)
+    if cpi_status == "Dato atípico":
+        return "REQUIERE VALIDACIÓN"
     if "Rojo" in (spi_status, cpi_status) or delay[1] in {"Alto", "Crítico"}:
         return "CRÍTICO"
     if "Amarillo" in (spi_status, cpi_status) or delay[1] == "Moderado":
@@ -637,7 +721,19 @@ def format_percent(value: Any) -> str:
     return f"{number:.0%}"
 
 
-def missing_fields(table: SourceTable) -> list[str]:
+def project_physical_progress(metrics: dict[str, Any]) -> float | None:
+    if metrics.get("PHYSICAL_PROGRESS") is not None:
+        return metrics.get("PHYSICAL_PROGRESS")
+    return safe_div(metrics.get("EV"), metrics.get("BAC"))
+
+
+def project_planned_progress(metrics: dict[str, Any]) -> float | None:
+    if metrics.get("PLANNED_PROGRESS") is not None:
+        return metrics.get("PLANNED_PROGRESS")
+    return safe_div(metrics.get("PV"), metrics.get("BAC"))
+
+
+def missing_fields(table: SourceTable, rows: list[dict[str, Any]]) -> list[str]:
     expected = {
         "WBS": "WBS",
         "RESPONSIBLE": "Responsable",
@@ -649,7 +745,12 @@ def missing_fields(table: SourceTable) -> list[str]:
         "MILESTONE": "Hitos",
         "STATUS": "Estado",
     }
-    return [label for key, label in expected.items() if key not in table.columns]
+    missing = [label for key, label in expected.items() if key not in table.columns]
+    if any(row.get("IS_CRITICAL_PATH") for row in rows):
+        missing = [label for label in missing if label != "Ruta crítica"]
+    if "PHYSICAL_PCT_COMPLETE" in table.columns or "PLANNED_PCT_COMPLETE" in table.columns:
+        missing = [label for label in missing if label != "% completado"]
+    return missing
 
 
 def write_dashboard(
@@ -672,7 +773,7 @@ def write_dashboard(
     delay = delay_probability(global_row, rows, activity_risks)
     trend = trend_label(global_row, activity_risks)
     finish_forecast = forecast_finish(global_row, rows)
-    missing = missing_fields(table)
+    missing = missing_fields(table, rows)
     narrative = build_executive_narrative(project_name, global_row, delay, activity_risks, missing)
     narrative_source = "local"
     if use_openai:
@@ -766,10 +867,11 @@ def write_title(
 
 
 def write_kpi_cards(ws, metrics: dict[str, Any], delay: tuple[float, str], trend: str) -> None:
+    cpi_status = classify_cpi(metrics)
     cards = [
         ("A4:C8", "SPI Global", format_index(metrics.get("SPI")), classify_index(metrics.get("SPI")), "EV / PV"),
-        ("D4:F8", "CPI Global", format_index(metrics.get("CPI")), classify_index(metrics.get("CPI")), "EV / AC"),
-        ("G4:I8", "EAC Forecast", format_money(metrics.get("EAC")), classify_index(metrics.get("CPI")), "BAC / CPI"),
+        ("D4:F8", "CPI Global", format_index(metrics.get("CPI")), cpi_status, "Validar AC" if cost_data_anomaly(metrics) else "EV / AC"),
+        ("G4:I8", "EAC Forecast", format_money(metrics.get("EAC")), cpi_status, "No confiable hasta validar AC" if cost_data_anomaly(metrics) else "BAC / CPI"),
         ("J4:L8", "Riesgo de Atraso", format_percent(delay[0]), delay[1], trend),
     ]
     for cell_range, title, value, status, subtitle in cards:
@@ -860,10 +962,10 @@ def write_kpi_table(ws, metrics: dict[str, Any], delay: tuple[float, str], trend
     table_header(ws, 19, headers)
     rows = [
         ("SPI Global", metrics.get("SPI"), classify_index(metrics.get("SPI")), "EV / PV", "SV", metrics.get("SV"), "Adelanto" if as_number(metrics.get("SV")) >= 0 else "Atraso", "EV - PV"),
-        ("CPI Global", metrics.get("CPI"), classify_index(metrics.get("CPI")), "EV / AC", "CV", metrics.get("CV"), "Ahorro" if as_number(metrics.get("CV")) >= 0 else "Sobrecosto", "EV - AC"),
-        ("BAC", metrics.get("BAC"), "", "Presupuesto total", "EAC", metrics.get("EAC"), classify_index(metrics.get("CPI")), "BAC / CPI"),
+        ("CPI Global", metrics.get("CPI"), classify_cpi(metrics), "Validar AC antes de interpretar", "CV", metrics.get("CV"), "Dato atípico" if cost_data_anomaly(metrics) else ("Ahorro" if as_number(metrics.get("CV")) >= 0 else "Sobrecosto"), "EV - AC"),
+        ("BAC", metrics.get("BAC"), "", "Presupuesto total", "EAC", metrics.get("EAC"), classify_cpi(metrics), "No confiable hasta validar AC" if cost_data_anomaly(metrics) else "BAC / CPI"),
         ("ETC", metrics.get("ETC"), "", "EAC - AC", "VAC", metrics.get("VAC"), "Favorable" if as_number(metrics.get("VAC")) >= 0 else "Presión", "BAC - EAC"),
-        ("% Avance real", safe_div(metrics.get("EV"), metrics.get("BAC")), "", "EV / BAC", "% Avance planificado", safe_div(metrics.get("PV"), metrics.get("BAC")), "", "PV / BAC"),
+        ("% Avance físico", project_physical_progress(metrics), "", "Physical % Complete", "% Avance planificado", project_planned_progress(metrics), "", "% Complete / Planned Value"),
         ("TCPI / IRPC", metrics.get("TCPI"), classify_tcpi(metrics.get("TCPI")), "(BAC-EV)/(BAC-AC)", "Forecast terminación", finish_forecast, trend, "Basado en fechas/SPI"),
         ("Riesgo de atraso", delay[0], delay[1], "Modelo EVM + riesgos", "Estado general", overall_status(metrics, delay), overall_status(metrics, delay), "Lectura PMO"),
     ]
@@ -901,7 +1003,14 @@ def write_forecast_table(
     rows = [
         ("SPI esperado al cierre", metrics.get("SPI"), trend, "SPI actual por falta de serie histórica"),
         ("CPI esperado al cierre", metrics.get("CPI"), trend, "CPI actual por falta de serie histórica"),
-        ("Forecast financiero", metrics.get("EAC"), "Favorable vs BAC" if as_number(metrics.get("VAC")) >= 0 else "Presión vs BAC", "EAC"),
+        (
+            "Forecast financiero",
+            metrics.get("EAC"),
+            "Validar AC: forecast no confiable"
+            if cost_data_anomaly(metrics)
+            else ("Favorable vs BAC" if as_number(metrics.get("VAC")) >= 0 else "Presión vs BAC"),
+            "EAC calculado con CPI; sujeto a calidad de AC",
+        ),
         ("Forecast de terminación", finish_forecast, "Limitado por fechas fuente" if "Fecha fin" in missing else trend, "Fecha fin + SPI"),
         ("Probabilidad estimada de atraso", delay[0], delay[1], "SPI + concentración de actividades críticas"),
         ("Limitaciones de fuente", ", ".join(missing) if missing else "Sin campos faltantes relevantes", "No inventar información", "Detección automática de columnas"),
@@ -924,36 +1033,47 @@ def write_forecast_table(
 
 
 def write_activity_table(ws, activity_risks: list[dict[str, Any]]) -> None:
-    section_header(ws, 39, "Actividades críticas")
+    section_header(ws, 39, "Actividades prioritarias y ruta crítica")
     merged_table_header(
         ws,
         40,
         [
             (1, 2, "Actividad / Paquete"),
-            (3, 3, "Responsable"),
-            (4, 4, "SPI"),
-            (5, 5, "CPI"),
-            (6, 6, "Float"),
-            (7, 7, "Impacto"),
-            (8, 8, "Riesgo"),
-            (9, 10, "Driver"),
-            (11, 12, "Acción correctiva recomendada"),
+            (3, 3, "WBS"),
+            (4, 4, "Inicio"),
+            (5, 5, "Fin"),
+            (6, 6, "SPI"),
+            (7, 7, "CPI"),
+            (8, 8, "Ruta crítica"),
+            (9, 9, "Riesgo"),
+            (10, 10, "Driver"),
+            (11, 12, "Acción recomendada"),
         ],
     )
     if not activity_risks:
         ws.merge_cells("A41:L41")
-        ws["A41"] = "No se detectaron actividades críticas con los criterios SPI/CPI/Float/CV/SV."
+        ws["A41"] = "No se detectaron actividades prioritarias por ruta crítica o desviaciones EVM."
         return
     for idx, item in enumerate(activity_risks[:10], start=41):
         ws.row_dimensions[idx].height = 38
         merged_value(ws, idx, 1, 2, item["Actividad"])
-        merged_value(ws, idx, 3, 3, item["Responsable"])
-        merged_value(ws, idx, 4, 4, item["SPI"], number_format="0.00", horizontal="center")
-        merged_value(ws, idx, 5, 5, item["CPI"], number_format="0.00", horizontal="center")
-        merged_value(ws, idx, 6, 6, item["Float"], horizontal="center")
-        merged_value(ws, idx, 7, 7, item["Impacto"], number_format='$#,##0;[Red]($#,##0)', horizontal="center")
-        merged_value(ws, idx, 8, 8, item["Riesgo"], fill=status_fill(str(item["Riesgo"])), bold=True, horizontal="center")
-        merged_value(ws, idx, 9, 10, item["Drivers"])
+        merged_value(ws, idx, 3, 3, item["WBS"], horizontal="center")
+        merged_value(ws, idx, 4, 4, item["Inicio"], number_format="dd/mm/yyyy", horizontal="center")
+        merged_value(ws, idx, 5, 5, item["Fin"], number_format="dd/mm/yyyy", horizontal="center")
+        merged_value(ws, idx, 6, 6, item["SPI"], number_format="0.00", horizontal="center")
+        merged_value(ws, idx, 7, 7, item["CPI"], number_format="0.00", horizontal="center")
+        merged_value(
+            ws,
+            idx,
+            8,
+            8,
+            "Sí" if item["RutaCritica"] else "No",
+            fill=PatternFill("solid", fgColor=PALETTE["red_light"]) if item["RutaCritica"] else None,
+            bold=item["RutaCritica"],
+            horizontal="center",
+        )
+        merged_value(ws, idx, 9, 9, item["Riesgo"], fill=status_fill(str(item["Riesgo"])), bold=True, horizontal="center")
+        merged_value(ws, idx, 10, 10, item["Drivers"])
         merged_value(ws, idx, 11, 12, item["Accion"])
 
 
@@ -1021,10 +1141,28 @@ def write_milestones_or_limits(ws, rows: list[dict[str, Any]], missing: list[str
             (9, 12, "Recomendación"),
         ],
     )
+    available = []
+    unavailable = []
+    for label, is_available in (
+        ("WBS", "WBS" in table.columns),
+        ("Fechas", "START" in table.columns and "FINISH" in table.columns),
+        ("Ruta crítica por color rojo", any(row.get("IS_CRITICAL_PATH") for row in rows)),
+        ("Responsable", "RESPONSIBLE" in table.columns),
+        ("Float/Holgura", "FLOAT" in table.columns),
+        ("Hitos", "MILESTONE" in table.columns),
+        ("Estado", "STATUS" in table.columns),
+    ):
+        (available if is_available else unavailable).append(label)
+
     validation = [
         ("Tabla de datos", f"Detectada en {table.sheet_name}!A{table.header_row}:{get_column_letter(max(table.columns.values()))}{table.data_end_row}", "OK", "Mantener encabezados consistentes."),
         ("Encabezados EVM", ", ".join(table.raw_headers.values()), "OK", "Exportar desde MS Project con los campos EVM requeridos."),
-        ("WBS / Responsable / Fechas / Float / Ruta crítica / Hitos / Estado", "No disponibles" if missing else "Disponibles", "Limitación" if missing else "OK", "Agregar estos campos al export para forecast calendario y ruta crítica."),
+        (
+            "Campos ampliados",
+            f"Disponibles: {', '.join(available)}. Faltan: {', '.join(unavailable) if unavailable else 'ninguno'}.",
+            "Limitación" if unavailable else "OK",
+            "Mantener WBS, Start, Finish, porcentajes y formato rojo; agregar los campos aún faltantes.",
+        ),
         ("Cálculos recalculados", "SPI, CPI, SV, CV, EAC, ETC, VAC, TCPI", "OK", "Validar contra línea base y cierre contable."),
     ]
     for idx, values in enumerate(validation, start=70):
@@ -1094,6 +1232,7 @@ def build_chart_images(
     )
 
     money_formatter = FuncFormatter(lambda value, _: f"${value/1000:,.0f}k")
+    money_detail_formatter = FuncFormatter(lambda value, _: f"${value:,.0f}")
     index_formatter = FuncFormatter(lambda value, _: f"{value:.2f}")
     analyzable = [row for row in rows[1:] if row_is_analyzable(row)]
     buffers: list[BytesIO] = []
@@ -1166,12 +1305,20 @@ def build_chart_images(
     else:
         buffers.append(no_data("3. SPI vs CPI"))
 
-    # 4. Forecast EAC
-    fig, ax = base_fig("4. Forecast EAC")
-    labels = ["BAC", "EAC", "ETC", "VAC"]
-    values = [as_number(metrics.get(key)) for key in labels]
-    ax.bar(labels, values, color=[f"#{PALETTE['blue']}", f"#{PALETTE['green']}", f"#{PALETTE['amber']}", f"#{PALETTE['gray']}"])
+    # 4. Forecast EAC with separate scales so small values remain visible
+    fig, (ax, ax_detail) = plt.subplots(1, 2, figsize=(5.2, 3.0), gridspec_kw={"width_ratios": [1.2, 1]})
+    fig.patch.set_facecolor("white")
+    fig.suptitle("4. Forecast financiero", x=0.02, ha="left", fontweight="bold", color=f"#{PALETTE['navy']}", fontsize=10)
+    ax.bar(["BAC", "VAC"], [as_number(metrics.get("BAC")), as_number(metrics.get("VAC"))], color=[f"#{PALETTE['blue']}", f"#{PALETTE['gray']}"])
+    ax_detail.bar(["EAC", "ETC"], [as_number(metrics.get("EAC")), as_number(metrics.get("ETC"))], color=[f"#{PALETTE['green']}", f"#{PALETTE['amber']}"])
+    for axis in (ax, ax_detail):
+        axis.grid(axis="y", color="#E5E7EB", linewidth=0.8)
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
     ax.yaxis.set_major_formatter(money_formatter)
+    ax_detail.yaxis.set_major_formatter(money_detail_formatter)
+    if cost_data_anomaly(metrics):
+        ax_detail.text(0.5, 0.95, "Validar AC", transform=ax_detail.transAxes, ha="center", va="top", color=f"#{PALETTE['red']}", fontweight="bold")
     buffers.append(finish(fig))
 
     # 5. Top risks
@@ -1186,17 +1333,20 @@ def build_chart_images(
     else:
         buffers.append(no_data("5. Riesgos principales"))
 
-    # 6. Critical activities by impact
-    critical_labels = [truncate_label(item["Actividad"], 24) for item in activity_risks[:8]]
-    critical_values = [as_number(item["Impacto"]) for item in activity_risks[:8]]
-    if critical_labels:
-        fig, ax = base_fig("6. Actividades criticas")
-        ax.barh(list(reversed(critical_labels)), list(reversed(critical_values)), color=f"#{PALETTE['amber']}")
-        ax.xaxis.set_major_formatter(money_formatter)
-        ax.set_xlabel("Impacto")
+    # 6. Critical path durations from the red source rows
+    critical_items = [
+        item for item in activity_risks
+        if item.get("RutaCritica") and item.get("Inicio") and item.get("Fin")
+    ][:8]
+    if critical_items:
+        fig, ax = base_fig("6. Ruta crítica - duración")
+        labels = [truncate_label(item["Actividad"], 24) for item in critical_items]
+        durations = [max(0, (item["Fin"] - item["Inicio"]).days) for item in critical_items]
+        ax.barh(list(reversed(labels)), list(reversed(durations)), color=f"#{PALETTE['red']}")
+        ax.set_xlabel("Duración calendario (días)")
         buffers.append(finish(fig))
     else:
-        buffers.append(no_data("6. Actividades criticas"))
+        buffers.append(no_data("6. Ruta crítica - duración"))
 
     # 7. Deviation distribution
     deviations = [as_number(row.get("SV")) for row in analyzable if row.get("SV") is not None]
@@ -1246,7 +1396,7 @@ def build_chart_images(
     else:
         buffers.append(no_data("9. Variacion cronograma", "Sin SV negativo"))
 
-    # 10. Cost variance
+    # 10. Cost variance: show savings when no negative CV exists
     negative_cv = sorted(
         [row for row in analyzable if row.get("CV") is not None and as_number(row.get("CV")) < 0],
         key=lambda row: as_number(row.get("CV")),
@@ -1260,7 +1410,23 @@ def build_chart_images(
         ax.set_xlabel("CV negativo")
         buffers.append(finish(fig))
     else:
-        buffers.append(no_data("10. Variacion costo", "Sin CV negativo"))
+        positive_cv = sorted(
+            [row for row in analyzable if row.get("CV") is not None and as_number(row.get("CV")) > 0],
+            key=lambda row: as_number(row.get("CV")),
+            reverse=True,
+        )[:8]
+        if positive_cv:
+            fig, ax = base_fig("10. Variación costo positiva")
+            labels = [truncate_label(str(row.get("TASK")), 24) for row in positive_cv]
+            values = [as_number(row.get("CV")) for row in positive_cv]
+            ax.barh(list(reversed(labels)), list(reversed(values)), color=f"#{PALETTE['green']}")
+            ax.xaxis.set_major_formatter(money_formatter)
+            ax.set_xlabel("CV positivo reportado")
+            if cost_data_anomaly(metrics):
+                ax.text(0.98, 0.03, "Interpretar tras validar AC", transform=ax.transAxes, ha="right", color=f"#{PALETTE['red']}", fontsize=7)
+            buffers.append(finish(fig))
+        else:
+            buffers.append(no_data("10. Variación costo", "Sin variación de costo disponible"))
 
     return buffers
 
