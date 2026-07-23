@@ -21,6 +21,13 @@ LOCAL_PROMPT = Path("Prompt.txt")
 EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
 
 
+class GraphHttpError(RuntimeError):
+    def __init__(self, code: int, details: str):
+        super().__init__(f"HTTP {code}: {details}")
+        self.code = code
+        self.details = details
+
+
 def required_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
@@ -143,13 +150,24 @@ def upload_file(token: str, local_path: Path, remote_path: str) -> dict:
     return request_json(request)
 
 
+def fallback_output_path(remote_path: str) -> str:
+    parts = [part for part in remote_path.replace("\\", "/").split("/") if part]
+    if not parts:
+        return f"Resumen_PMO_retry_{datetime.utcnow():%Y%m%d_%H%M%S}Z.xlsx"
+    filename = parts[-1]
+    suffix = Path(filename).suffix or ".xlsx"
+    stem = filename[: -len(suffix)] if suffix else filename
+    parts[-1] = f"{stem}_retry_{datetime.utcnow():%Y%m%d_%H%M%S}Z{suffix}"
+    return "/".join(parts)
+
+
 def request_json(request: urllib.request.Request) -> dict:
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         details = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code}: {details}") from exc
+        raise GraphHttpError(exc.code, details) from exc
     return json.loads(body) if body else {}
 
 
@@ -237,7 +255,17 @@ def main() -> int:
 
     remote_output = output_remote_path()
     print(f"Subiendo resultado a OneDrive: {remote_output}")
-    upload_result = upload_file(token, generated_path, remote_output)
+    try:
+        upload_result = upload_file(token, generated_path, remote_output)
+    except GraphHttpError as exc:
+        if exc.code != 423:
+            raise
+        fallback_output = fallback_output_path(remote_output)
+        print(
+            "OneDrive devolvio 423 Locked para el nombre esperado. "
+            f"Subiendo copia alternativa: {fallback_output}"
+        )
+        upload_result = upload_file(token, generated_path, fallback_output)
     web_url = upload_result.get("webUrl", "(sin webUrl en respuesta)")
     print(f"Dashboard publicado: {web_url}")
     return 0
