@@ -364,6 +364,22 @@ def is_global_wbs(row: dict[str, Any]) -> bool:
     return normalized_wbs(row.get("WBS")) == "1"
 
 
+def leaf_activity_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    wbs_values = [normalized_wbs(row.get("WBS")) for row in rows]
+    usable_wbs = [value for value in wbs_values if value]
+    if not usable_wbs:
+        return rows[1:]
+
+    leaves: list[dict[str, Any]] = []
+    for row, wbs in zip(rows, wbs_values):
+        if not wbs or wbs == "1":
+            continue
+        if any(other != wbs and other.startswith(f"{wbs}.") for other in usable_wbs):
+            continue
+        leaves.append(row)
+    return leaves or rows[1:]
+
+
 def metric_completeness(row: dict[str, Any]) -> int:
     return sum(1 for key in ("PV", "EV", "AC", "BAC") if row.get(key) is not None)
 
@@ -1262,6 +1278,7 @@ def build_chart_images(
     money_detail_formatter = FuncFormatter(lambda value, _: f"${value:,.0f}")
     index_formatter = FuncFormatter(lambda value, _: f"{value:.2f}")
     analyzable = [row for row in rows[1:] if row_is_analyzable(row)]
+    leaf_analyzable = [row for row in leaf_activity_rows(rows) if row_is_analyzable(row)]
     buffers: list[BytesIO] = []
 
     def finish(fig) -> BytesIO:
@@ -1296,10 +1313,10 @@ def build_chart_images(
     ax.yaxis.set_major_formatter(money_formatter)
     buffers.append(finish(fig))
 
-    # 2. Curva S by exported sequence
-    curve_rows = [row for row in analyzable if any(as_number(row.get(key)) > 0 for key in ("PV", "EV", "AC"))][:80]
+    # 2. Curva S by exported leaf sequence. Parent WBS rows are excluded to avoid double counting.
+    curve_rows = [row for row in leaf_analyzable if any(as_number(row.get(key)) > 0 for key in ("PV", "EV", "AC"))][:80]
     if curve_rows:
-        fig, ax = base_fig("2. Curva S EVM - secuencia")
+        fig, ax = base_fig("2. Curva S EVM - hojas WBS")
         x = list(range(1, len(curve_rows) + 1))
         for key, color in (("PV", "blue"), ("EV", "green"), ("AC", "amber")):
             total = 0.0
@@ -1307,13 +1324,17 @@ def build_chart_images(
             for row in curve_rows:
                 total += max(0.0, as_number(row.get(key)))
                 y.append(total)
+            global_value = max(0.0, as_number(metrics.get(key)))
+            if total > 0 and global_value > 0:
+                scale = global_value / total
+                y = [value * scale for value in y]
             ax.plot(x, y, linewidth=1.8, label=key, color=f"#{PALETTE[color]}")
         ax.yaxis.set_major_formatter(money_formatter)
-        ax.set_xlabel("Secuencia de actividades")
+        ax.set_xlabel("Secuencia de actividades hoja")
         ax.legend(loc="upper left")
         buffers.append(finish(fig))
     else:
-        buffers.append(no_data("2. Curva S EVM - secuencia"))
+        buffers.append(no_data("2. Curva S EVM - hojas WBS"))
 
     # 3. SPI vs CPI
     scatter_rows = [row for row in analyzable if row.get("SPI") is not None and row.get("CPI") is not None][:120]
