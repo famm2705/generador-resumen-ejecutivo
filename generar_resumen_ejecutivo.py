@@ -429,7 +429,7 @@ def activity_risk(row: dict[str, Any]) -> dict[str, Any] | None:
     if spi is not None and as_number(row.get("PV")) > 0 and spi < 0.85:
         score += min(35, (0.85 - spi) * 60)
         drivers.append("bajo SPI")
-    if cpi is not None and cpi < 0.85 and (as_number(row.get("AC")) > 0 or as_number(row.get("BAC")) > 0):
+    if cpi is not None and cpi < 0.85 and as_number(row.get("AC")) > 0:
         score += min(35, (0.85 - cpi) * 60)
         drivers.append("bajo CPI")
     if float_value is not None and float_value < 0:
@@ -1226,8 +1226,8 @@ def write_visualizations(
     section_header(ws, 78, "Visualizaciones ejecutivas", "L")
     ws.merge_cells("A79:L79")
     ws["A79"] = (
-        "10 graficos embebidos como imagenes PNG para evitar fallas de carga de charts nativos. "
-        "Cuando la fuente no trae fechas o serie historica, las tendencias usan la secuencia de actividades exportada."
+        "7 graficos embebidos como imagenes PNG para evitar fallas de carga de charts nativos. "
+        "Los valores globales usan WBS 1; los graficos de actividad usan las filas exportadas."
     )
     ws["A79"].fill = PatternFill("solid", fgColor=PALETTE["gray_light"])
     ws["A79"].alignment = Alignment(wrap_text=True, vertical="center")
@@ -1242,7 +1242,7 @@ def write_visualizations(
         ws["A80"].alignment = Alignment(wrap_text=True, vertical="center")
         return
 
-    anchors = ["A81", "G81", "A97", "G97", "A113", "G113", "A129", "G129", "A145", "G145"]
+    anchors = ["A81", "G81", "A97", "G97", "A113", "G113", "A129"]
     ws._pmo_image_buffers = chart_buffers
     for buffer, anchor in zip(chart_buffers, anchors):
         image = ExcelImage(buffer)
@@ -1275,10 +1275,8 @@ def build_chart_images(
     )
 
     money_formatter = FuncFormatter(lambda value, _: f"${value/1000:,.0f}k")
-    money_detail_formatter = FuncFormatter(lambda value, _: f"${value:,.0f}")
     index_formatter = FuncFormatter(lambda value, _: f"{value:.2f}")
     analyzable = [row for row in rows[1:] if row_is_analyzable(row)]
-    leaf_analyzable = [row for row in leaf_activity_rows(rows) if row_is_analyzable(row)]
     buffers: list[BytesIO] = []
 
     def finish(fig) -> BytesIO:
@@ -1313,94 +1311,38 @@ def build_chart_images(
     ax.yaxis.set_major_formatter(money_formatter)
     buffers.append(finish(fig))
 
-    # 2. Curva S by exported leaf sequence. Parent WBS rows are excluded to avoid double counting.
-    curve_rows = [row for row in leaf_analyzable if any(as_number(row.get(key)) > 0 for key in ("PV", "EV", "AC"))][:80]
-    if curve_rows:
-        fig, ax = base_fig("2. Curva S EVM - hojas WBS")
-        x = list(range(1, len(curve_rows) + 1))
-        for key, color in (("PV", "blue"), ("EV", "green"), ("AC", "amber")):
-            total = 0.0
-            y = []
-            for row in curve_rows:
-                total += max(0.0, as_number(row.get(key)))
-                y.append(total)
-            global_value = max(0.0, as_number(metrics.get(key)))
-            if total > 0 and global_value > 0:
-                scale = global_value / total
-                y = [value * scale for value in y]
-            ax.plot(x, y, linewidth=1.8, label=key, color=f"#{PALETTE[color]}")
-        ax.yaxis.set_major_formatter(money_formatter)
-        ax.set_xlabel("Secuencia de actividades hoja")
-        ax.legend(loc="upper left")
-        buffers.append(finish(fig))
-    else:
-        buffers.append(no_data("2. Curva S EVM - hojas WBS"))
-
-    # 3. SPI vs CPI
-    scatter_rows = [row for row in analyzable if row.get("SPI") is not None and row.get("CPI") is not None][:120]
-    if scatter_rows:
-        fig, ax = base_fig("3. SPI vs CPI")
-        x = [as_number(row.get("SPI")) for row in scatter_rows]
-        y = [as_number(row.get("CPI")) for row in scatter_rows]
-        ax.scatter(x, y, s=22, alpha=0.75, color=f"#{PALETTE['blue']}")
-        ax.axvline(0.95, color=f"#{PALETTE['red']}", linestyle="--", linewidth=1)
-        ax.axhline(0.95, color=f"#{PALETTE['red']}", linestyle="--", linewidth=1)
-        ax.set_xlabel("SPI")
-        ax.set_ylabel("CPI")
-        ax.xaxis.set_major_formatter(index_formatter)
-        ax.yaxis.set_major_formatter(index_formatter)
-        buffers.append(finish(fig))
-    else:
-        buffers.append(no_data("3. SPI vs CPI"))
-
-    # 4. Forecast EAC with separate scales so small values remain visible
-    fig, (ax, ax_detail) = plt.subplots(1, 2, figsize=(5.2, 3.0), gridspec_kw={"width_ratios": [1.2, 1]})
-    fig.patch.set_facecolor("white")
-    fig.suptitle("4. Forecast financiero", x=0.02, ha="left", fontweight="bold", color=f"#{PALETTE['navy']}", fontsize=10)
-    ax.bar(["BAC", "VAC"], [as_number(metrics.get("BAC")), as_number(metrics.get("VAC"))], color=[f"#{PALETTE['blue']}", f"#{PALETTE['gray']}"])
-    ax_detail.bar(["EAC", "ETC"], [as_number(metrics.get("EAC")), as_number(metrics.get("ETC"))], color=[f"#{PALETTE['green']}", f"#{PALETTE['amber']}"])
-    for axis in (ax, ax_detail):
-        axis.grid(axis="y", color="#E5E7EB", linewidth=0.8)
-        axis.spines["top"].set_visible(False)
-        axis.spines["right"].set_visible(False)
-    ax.yaxis.set_major_formatter(money_formatter)
-    ax_detail.yaxis.set_major_formatter(money_detail_formatter)
-    if cost_data_anomaly(metrics):
-        ax_detail.text(0.5, 0.95, "Validar AC", transform=ax_detail.transAxes, ha="center", va="top", color=f"#{PALETTE['red']}", fontweight="bold")
-    buffers.append(finish(fig))
-
-    # 5. Top risks
+    # 2. Top risks
     risk_labels = [truncate_label(str(risk["Actividad afectada"]), 24) for risk in top_risks[:8]]
     risk_values = [as_number(risk["Severidad"]) for risk in top_risks[:8]]
     if risk_labels:
-        fig, ax = base_fig("5. Riesgos principales")
+        fig, ax = base_fig("2. Riesgos principales")
         ax.barh(list(reversed(risk_labels)), list(reversed(risk_values)), color=f"#{PALETTE['red']}")
         ax.set_xlim(0, 100)
         ax.set_xlabel("Severidad")
         buffers.append(finish(fig))
     else:
-        buffers.append(no_data("5. Riesgos principales"))
+        buffers.append(no_data("2. Riesgos principales"))
 
-    # 6. Critical path durations from the red source rows
+    # 3. Critical path durations from the red source rows
     critical_items = [
         item for item in activity_risks
         if item.get("RutaCritica") and item.get("Inicio") and item.get("Fin")
     ][:8]
     if critical_items:
-        fig, ax = base_fig("6. Ruta crítica - duración")
+        fig, ax = base_fig("3. Ruta crítica - duración")
         labels = [truncate_label(item["Actividad"], 24) for item in critical_items]
         durations = [max(0, (item["Fin"] - item["Inicio"]).days) for item in critical_items]
         ax.barh(list(reversed(labels)), list(reversed(durations)), color=f"#{PALETTE['red']}")
         ax.set_xlabel("Duración calendario (días)")
         buffers.append(finish(fig))
     else:
-        buffers.append(no_data("6. Ruta crítica - duración"))
+        buffers.append(no_data("3. Ruta crítica - duración"))
 
-    # 7. Deviation distribution
+    # 4. Deviation distribution
     deviations = [as_number(row.get("SV")) for row in analyzable if row.get("SV") is not None]
     cost_deviations = [as_number(row.get("CV")) for row in analyzable if row.get("CV") is not None]
     if deviations or cost_deviations:
-        fig, ax = base_fig("7. Distribucion de desviaciones")
+        fig, ax = base_fig("4. Distribucion de desviaciones")
         if deviations:
             ax.hist(deviations, bins=16, alpha=0.65, label="SV", color=f"#{PALETTE['blue']}")
         if cost_deviations:
@@ -1409,12 +1351,12 @@ def build_chart_images(
         ax.legend(loc="upper right")
         buffers.append(finish(fig))
     else:
-        buffers.append(no_data("7. Distribucion de desviaciones"))
+        buffers.append(no_data("4. Distribucion de desviaciones"))
 
-    # 8. Performance trend by sequence
+    # 5. Performance trend by sequence
     trend_rows = [row for row in analyzable if row.get("SPI") is not None or row.get("CPI") is not None][:80]
     if trend_rows:
-        fig, ax = base_fig("8. Tendencia de desempeno")
+        fig, ax = base_fig("5. Tendencia de desempeno")
         x = list(range(1, len(trend_rows) + 1))
         spi = [as_number(row.get("SPI"), float("nan")) for row in trend_rows]
         cpi = [as_number(row.get("CPI"), float("nan")) for row in trend_rows]
@@ -1426,15 +1368,15 @@ def build_chart_images(
         ax.legend(loc="upper right")
         buffers.append(finish(fig))
     else:
-        buffers.append(no_data("8. Tendencia de desempeno"))
+        buffers.append(no_data("5. Tendencia de desempeno"))
 
-    # 9. Schedule variance
+    # 6. Schedule variance
     negative_sv = sorted(
         [row for row in analyzable if row.get("SV") is not None and as_number(row.get("SV")) < 0],
         key=lambda row: as_number(row.get("SV")),
     )[:8]
     if negative_sv:
-        fig, ax = base_fig("9. Variacion cronograma")
+        fig, ax = base_fig("6. Variacion cronograma")
         labels = [truncate_label(str(row.get("TASK")), 24) for row in negative_sv]
         values = [abs(as_number(row.get("SV"))) for row in negative_sv]
         ax.barh(list(reversed(labels)), list(reversed(values)), color=f"#{PALETTE['red']}")
@@ -1442,15 +1384,15 @@ def build_chart_images(
         ax.set_xlabel("SV negativo")
         buffers.append(finish(fig))
     else:
-        buffers.append(no_data("9. Variacion cronograma", "Sin SV negativo"))
+        buffers.append(no_data("6. Variacion cronograma", "Sin SV negativo"))
 
-    # 10. Cost variance: show savings when no negative CV exists
+    # 7. Cost variance: show savings when no negative CV exists
     negative_cv = sorted(
         [row for row in analyzable if row.get("CV") is not None and as_number(row.get("CV")) < 0],
         key=lambda row: as_number(row.get("CV")),
     )[:8]
     if negative_cv:
-        fig, ax = base_fig("10. Variacion costo")
+        fig, ax = base_fig("7. Variacion costo")
         labels = [truncate_label(str(row.get("TASK")), 24) for row in negative_cv]
         values = [abs(as_number(row.get("CV"))) for row in negative_cv]
         ax.barh(list(reversed(labels)), list(reversed(values)), color=f"#{PALETTE['red']}")
@@ -1464,7 +1406,7 @@ def build_chart_images(
             reverse=True,
         )[:8]
         if positive_cv:
-            fig, ax = base_fig("10. Variación costo positiva")
+            fig, ax = base_fig("7. Variación costo positiva")
             labels = [truncate_label(str(row.get("TASK")), 24) for row in positive_cv]
             values = [as_number(row.get("CV")) for row in positive_cv]
             ax.barh(list(reversed(labels)), list(reversed(values)), color=f"#{PALETTE['green']}")
@@ -1474,7 +1416,7 @@ def build_chart_images(
                 ax.text(0.98, 0.03, "Interpretar tras validar AC", transform=ax.transAxes, ha="right", color=f"#{PALETTE['red']}", fontsize=7)
             buffers.append(finish(fig))
         else:
-            buffers.append(no_data("10. Variación costo", "Sin variación de costo disponible"))
+            buffers.append(no_data("7. Variación costo", "Sin variación de costo disponible"))
 
     return buffers
 
