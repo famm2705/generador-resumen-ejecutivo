@@ -213,6 +213,10 @@ def quote_path_part(value: str) -> str:
 
 def output_remote_path() -> str:
     folder = os.getenv("ONEDRIVE_OUTPUT_FOLDER", "PMO EVM Reporting/Output").strip().strip("/")
+    if os.getenv("ONEDRIVE_OUTPUT_CURRENT_DATE", "").lower() in {"1", "true", "yes", "y"}:
+        filename = f"Resumen_PMO_{today_panama():%d_%m_%Y}.xlsx"
+        return f"{folder}/{filename}"
+
     if os.getenv("ONEDRIVE_OUTPUT_NEXT_MONDAY", "").lower() in {"1", "true", "yes", "y"}:
         filename = f"Resumen_PMO_{next_monday_panama():%d_%m_%Y}.xlsx"
         return f"{folder}/{filename}"
@@ -223,14 +227,22 @@ def output_remote_path() -> str:
     return f"{folder}/{filename}"
 
 
-def next_monday_panama() -> date:
+def panama_today() -> date:
     try:
         panama_tz = ZoneInfo("America/Panama")
     except ZoneInfoNotFoundError:
         # Panama does not use daylight saving time; UTC-5 is a safe fallback
         # for Windows/Python environments without the tzdata package installed.
         panama_tz = timezone(timedelta(hours=-5), name="America/Panama")
-    today = datetime.now(panama_tz).date()
+    return datetime.now(panama_tz).date()
+
+
+def today_panama() -> date:
+    return panama_today()
+
+
+def next_monday_panama() -> date:
+    today = panama_today()
     days_until_monday = (0 - today.weekday()) % 7
     return today + timedelta(days=days_until_monday)
 

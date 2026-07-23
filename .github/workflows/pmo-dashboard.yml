@@ -36,7 +36,7 @@ jobs:
           ONEDRIVE_INPUT_LATEST: "true"
           ONEDRIVE_PROMPT_PATH: ${{ vars.ONEDRIVE_PROMPT_PATH }}
           ONEDRIVE_OUTPUT_FOLDER: ${{ vars.ONEDRIVE_OUTPUT_FOLDER }}
-          ONEDRIVE_OUTPUT_NEXT_MONDAY: "true"
+          ONEDRIVE_OUTPUT_CURRENT_DATE: "true"
           USE_OPENAI: "true"
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
