@@ -344,10 +344,37 @@ def delta(left: float | None, right: float | None) -> float | None:
     return left - right
 
 
+def normalized_wbs(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        number = float(value)
+        if number.is_integer():
+            return str(int(number))
+        return str(number).rstrip("0").rstrip(".")
+    text = re.sub(r"\s+", "", str(value).strip())
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        number = float(text)
+        if number.is_integer():
+            return str(int(number))
+    return text
+
+
+def is_global_wbs(row: dict[str, Any]) -> bool:
+    return normalized_wbs(row.get("WBS")) == "1"
+
+
+def metric_completeness(row: dict[str, Any]) -> int:
+    return sum(1 for key in ("PV", "EV", "AC", "BAC") if row.get(key) is not None)
+
+
 def select_global_row(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    wbs_one_candidates = [row for row in rows if is_global_wbs(row) and metric_completeness(row) >= 3]
+    if wbs_one_candidates:
+        return max(wbs_one_candidates, key=lambda item: (metric_completeness(item), as_number(item.get("BAC"))))
+
     first = rows[0]
-    required = sum(1 for key in ("PV", "EV", "AC", "BAC") if first.get(key) is not None)
-    if required >= 3:
+    if metric_completeness(first) >= 3:
         return first
 
     candidates = [row for row in rows if as_number(row.get("BAC")) > 0 and row.get("PV") is not None and row.get("EV") is not None]
