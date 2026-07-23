@@ -1481,7 +1481,7 @@ def build_chart_images(
     buffers.append(finish(fig))
 
     # 2. Top risks
-    risk_labels = [truncate_label(str(risk["Actividad afectada"]), 24) for risk in top_risks[:8]]
+    risk_labels = [truncate_label(str(risk["Riesgo"]), 32) for risk in top_risks[:8]]
     risk_values = [as_number(risk["Severidad"]) for risk in top_risks[:8]]
     if risk_labels:
         fig, ax = base_fig("2. Riesgos principales")
@@ -1649,7 +1649,7 @@ def write_chart_data(ws, metrics: dict[str, Any], top_risks: list[dict[str, Any]
     ws[f"N{start + 12}"] = "Riesgo"
     ws[f"O{start + 12}"] = "Severidad"
     for idx, risk in enumerate(top_risks[:10], start=start + 13):
-        ws.cell(idx, 14).value = str(risk["Actividad afectada"])[:28]
+        ws.cell(idx, 14).value = str(risk["Riesgo"])[:28]
         ws.cell(idx, 15).value = risk["Severidad"]
 
     for col in range(14, 18):
